@@ -1,0 +1,7 @@
+{
+  "name": "Spokemon",
+  "description": "A voice-activated flashcard app where learning words evolves your personal AI creature.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
