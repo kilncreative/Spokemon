@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="theme-color" content="#fbf0d9" />
+<title>Word Runner — a Kindle-style speed reader</title>
+<style>
+  /* ---------- Theme tokens (Kindle app palettes) ---------- */
+  :root {
+    --bg: #fbf0d9;          /* page background        */
+    --fg: #5b4636;          /* main text              */
+    --muted: #9a8c74;       /* secondary text         */
+    --panel: #f3e6c8;       /* control panel surface  */
+    --panel-line: #e2d3ad;  /* hairline borders       */
+    --accent: #c0392b;      /* focus letter / ORP     */
+    --guide: rgba(0,0,0,.18);
+    --font: 'Bookerly', Georgia, 'Times New Roman', serif;
+    --reader-size: 56px;
+    --reader-weight: 400;
+    --letter-spacing: 0em;
+    --contrast: 1;
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    filter: contrast(var(--contrast));
+    transition: background .3s ease, color .3s ease;
+  }
+
+  button { font-family: inherit; cursor: pointer; }
+
+  /* ---------- Top bar ---------- */
+  .topbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--panel-line);
+    background: var(--panel);
+    z-index: 5;
+  }
+  .brand { font-weight: 700; letter-spacing: .5px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  .brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+  .book-title { font-size: 13px; color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .iconbtn {
+    background: transparent; border: 1px solid var(--panel-line); color: var(--fg);
+    width: 38px; height: 34px; border-radius: 9px; font-size: 16px; display: grid; place-items: center;
+    transition: background .15s;
+  }
+  .iconbtn:hover { background: var(--panel-line); }
+  .iconbtn.text { width: auto; padding: 0 12px; font-size: 13px; font-weight: 600; }
+
+  /* ---------- Reader stage ---------- */
+  .stage {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    position: relative; padding: 20px; min-height: 0;
+  }
+
+  /* The word runner viewport */
+  .runner {
+    position: relative;
+    width: min(760px, 92vw);
+    height: 220px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  /* Guide rails above & below the focal letter */
+  .runner::before, .runner::after {
+    content: ""; position: absolute; left: 50%; transform: translateX(-50%);
+    width: 2px; height: 16px; background: var(--guide);
+  }
+  .runner::before { top: calc(50% - 60px); }
+  .runner::after  { top: calc(50% + 44px); }
+
+  .word {
+    font-family: var(--font);
+    font-size: var(--reader-size);
+    font-weight: var(--reader-weight);
+    letter-spacing: var(--letter-spacing);
+    line-height: 1;
+    white-space: nowrap;
+    /* absolute pivot: keep the focal letter pinned to center */
+    position: relative;
+    display: inline-flex;
+  }
+  .word .pre  { text-align: right; }
+  .word .orp  { color: var(--accent); }
+  .word .post { text-align: left; }
+
+  .idle-hint {
+    color: var(--muted); font-size: 15px; text-align: center; max-width: 460px; line-height: 1.6;
+  }
+  .idle-hint b { color: var(--fg); }
+
+  /* ---------- Progress + transport ---------- */
+  .transport {
+    width: min(760px, 92vw);
+    display: flex; flex-direction: column; gap: 14px;
+    padding-bottom: 6px;
+  }
+  .scrub { display: flex; align-items: center; gap: 12px; font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); }
+  .scrub input[type=range] { flex: 1; }
+  .controls { display: flex; align-items: center; justify-content: center; gap: 10px; }
+  .ctrl {
+    background: transparent; border: 1px solid var(--panel-line); color: var(--fg);
+    height: 44px; min-width: 44px; border-radius: 11px; font-size: 16px; padding: 0 14px;
+    display: grid; place-items: center; transition: background .15s, transform .05s;
+  }
+  .ctrl:hover { background: var(--panel-line); }
+  .ctrl:active { transform: scale(.94); }
+  .ctrl.play {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+    min-width: 60px; font-size: 18px;
+  }
+  .ctrl.play:hover { filter: brightness(1.06); }
+  .wpm-badge { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 78px; text-align: center; }
+
+  /* Sliders */
+  input[type=range] {
+    -webkit-appearance: none; appearance: none; height: 4px; border-radius: 4px;
+    background: var(--panel-line); outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--accent); cursor: pointer; border: 2px solid var(--bg);
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 18px; height: 18px; border-radius: 50%; background: var(--accent); cursor: pointer; border: 2px solid var(--bg);
+  }
+
+  /* ---------- Slide-out panels ---------- */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.28);
+    opacity: 0; pointer-events: none; transition: opacity .25s; z-index: 20;
+  }
+  .overlay.open { opacity: 1; pointer-events: auto; }
+
+  .panel {
+    position: fixed; top: 0; right: 0; height: 100%; width: min(400px, 92vw);
+    background: var(--panel); border-left: 1px solid var(--panel-line);
+    transform: translateX(100%); transition: transform .28s cubic-bezier(.4,0,.2,1);
+    z-index: 21; display: flex; flex-direction: column;
+    box-shadow: -12px 0 40px rgba(0,0,0,.12);
+  }
+  .panel.left { right: auto; left: 0; border-left: none; border-right: 1px solid var(--panel-line); transform: translateX(-100%); box-shadow: 12px 0 40px rgba(0,0,0,.12); }
+  .panel.open { transform: translateX(0); }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 20px; border-bottom: 1px solid var(--panel-line);
+  }
+  .panel-head h2 { margin: 0; font-size: 16px; }
+  .panel-body { overflow-y: auto; padding: 18px 20px 40px; }
+
+  .group { margin-bottom: 26px; }
+  .group > label.title { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin-bottom: 12px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+  .row .val { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 60px; text-align: right; }
+  .row.slider { flex-direction: column; align-items: stretch; gap: 8px; }
+  .row.slider .top { display: flex; justify-content: space-between; font-size: 13px; }
+
+  /* Theme swatches */
+  .swatches { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .swatch {
+    height: 56px; border-radius: 10px; border: 2px solid transparent; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; font-family: Georgia, serif; font-size: 22px;
+    position: relative; transition: transform .1s;
+  }
+  .swatch:active { transform: scale(.95); }
+  .swatch.sel { border-color: var(--accent); }
+  .swatch small { position: absolute; bottom: 4px; font-size: 9px; font-family: system-ui; letter-spacing: .3px; opacity: .8; }
+
+  /* Font chooser */
+  .fonts { display: flex; flex-direction: column; gap: 8px; }
+  .fontopt {
+    text-align: left; padding: 11px 14px; border-radius: 10px; border: 1px solid var(--panel-line);
+    background: transparent; color: var(--fg); font-size: 18px; display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .fontopt small { font-family: system-ui; font-size: 11px; color: var(--muted); }
+  .fontopt.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+
+  /* Toggles */
+  .toggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+  .toggle .desc { font-size: 13px; }
+  .toggle .desc small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .switch { position: relative; width: 46px; height: 26px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .track { position: absolute; inset: 0; background: var(--panel-line); border-radius: 20px; transition: .2s; }
+  .switch .track::before { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .2s; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track::before { transform: translateX(20px); }
+
+  /* Library / import */
+  .dropzone {
+    border: 2px dashed var(--panel-line); border-radius: 14px; padding: 26px 18px; text-align: center;
+    color: var(--muted); font-size: 14px; margin-bottom: 20px; transition: border-color .15s, background .15s;
+  }
+  .dropzone.hot { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  .dropzone b { color: var(--fg); }
+  .primary {
+    background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 11px 16px;
+    font-size: 14px; font-weight: 600; margin-top: 12px;
+  }
+  .ghostbtn { background: transparent; border: 1px solid var(--panel-line); color: var(--fg); border-radius: 10px; padding: 10px 14px; font-size: 13px; }
+
+  textarea.paste {
+    width: 100%; min-height: 120px; border-radius: 12px; border: 1px solid var(--panel-line);
+    background: var(--bg); color: var(--fg); padding: 12px; font-size: 14px; resize: vertical; font-family: var(--font);
+  }
+
+  .lib { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+  .libitem {
+    display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 11px;
+    border: 1px solid var(--panel-line); background: var(--bg); text-align: left;
+  }
+  .libitem:hover { border-color: var(--accent); }
+  .libitem .meta { flex: 1; min-width: 0; }
+  .libitem .meta strong { display: block; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .libitem .meta span { font-size: 11px; color: var(--muted); }
+  .libitem .del { color: var(--muted); border: none; background: transparent; font-size: 18px; padding: 4px 8px; }
+  .libitem .del:hover { color: var(--accent); }
+  .libitem .pct { font-size: 11px; color: var(--accent); font-variant-numeric: tabular-nums; }
+
+  .note { font-size: 12px; line-height: 1.6; color: var(--muted); background: var(--bg); border: 1px solid var(--panel-line); border-radius: 12px; padding: 14px; }
+  .note b { color: var(--fg); }
+
+  .kbd { font-family: ui-monospace, monospace; background: var(--bg); border: 1px solid var(--panel-line); border-radius: 5px; padding: 1px 6px; font-size: 11px; }
+
+  .empty { text-align: center; color: var(--muted); font-size: 13px; padding: 20px 0; }
+
+  /* Chapter caption under runner */
+  .chapter-cap { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); font-size: 12px; color: var(--muted); max-width: 80%; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .flash-controls { position: absolute; top: 14px; right: 16px; font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span> Word&nbsp;Runner</div>
+    <div class="book-title" id="bookTitle">No book loaded</div>
+    <button class="iconbtn text" id="openLibrary" title="Library & import (L)">📚 Library</button>
+    <button class="iconbtn" id="openSettings" title="Reading settings (S)">⚙️</button>
+  </div>
+
+  <div class="stage">
+    <div class="flash-controls" id="chunkLabel"></div>
+    <div class="runner" id="runner">
+      <div class="idle-hint" id="idleHint">
+        Open <b>📚 Library</b> to import a book (EPUB or TXT) or paste text,
+        then press <span class="kbd">Space</span> to start the word runner.
+      </div>
+      <div class="word" id="word" style="display:none"></div>
+      <div class="chapter-cap" id="chapterCap"></div>
+    </div>
+
+    <div class="transport">
+      <div class="scrub">
+        <span id="elapsed">0:00</span>
+        <input type="range" id="scrubber" min="0" max="0" value="0" step="1" />
+        <span id="remaining">0:00</span>
+      </div>
+      <div class="controls">
+        <button class="ctrl" id="restart" title="Restart">⏮</button>
+        <button class="ctrl" id="backSent" title="Back a sentence (←)">⏪</button>
+        <button class="ctrl play" id="playpause" title="Play / Pause (Space)">▶</button>
+        <button class="ctrl" id="fwdSent" title="Forward a sentence (→)">⏩</button>
+        <div class="wpm-badge"><span id="wpmVal">400</span> wpm</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings panel -->
+  <div class="overlay" id="overlay"></div>
+  <aside class="panel" id="settingsPanel" aria-label="Reading settings">
+    <div class="panel-head">
+      <h2>Reading experience</h2>
+      <button class="iconbtn" data-close>✕</button>
+    </div>
+    <div class="panel-body">
+      <div class="group">
+        <label class="title">Theme</label>
+        <div class="swatches" id="swatches"></div>
+      </div>
+
+      <div class="group">
+        <label class="title">Typeface</label>
+        <div class="fonts" id="fonts"></div>
+      </div>
+
+      <div class="group">
+        <label class="title">Pace &amp; size</label>
+        <div class="row slider">
+          <div class="top"><span>Speed</span><span class="val"><span id="wpmOut">400</span> wpm</span></div>
+          <input type="range" id="wpm" min="100" max="1000" step="10" value="400" />
+        </div>
+        <div class="row slider">
+          <div class="top"><span>Font size</span><span class="val"><span id="sizeOut">56</span> px</span></div>
+          <input type="range" id="size" min="28" max="110" step="2" value="56" />
+        </div>
+        <div class="row slider">
+          <div class="top"><span>Words per flash</span><span class="val"><span id="chunkOut">1</span></span></div>
+          <input type="range" id="chunk" min="1" max="4" step="1" value="1" />
+        </div>
+        <div class="row slider">
+          <div class="top"><span>Font weight</span><span class="val"><span id="weightOut">Regular</span></span></div>
+          <input type="range" id="weight" min="300" max="700" step="100" value="400" />
+        </div>
+        <div class="row slider">
+          <div class="top"><span>Letter spacing</span><span class="val"><span id="lsOut">0</span></span></div>
+          <input type="range" id="ls" min="0" max="12" step="1" value="0" />
+        </div>
+        <div class="row slider">
+          <div class="top"><span>Contrast</span><span class="val"><span id="contrastOut">100%</span></span></div>
+          <input type="range" id="contrast" min="80" max="160" step="5" value="100" />
+        </div>
+      </div>
+
+      <div class="group">
+        <label class="title">Focus &amp; flow</label>
+        <div class="toggle">
+          <div class="desc">Focus letter (ORP)<small>Red pivot letter to anchor your eye</small></div>
+          <label class="switch"><input type="checkbox" id="orpToggle" checked><span class="track"></span></label>
+        </div>
+        <div class="toggle">
+          <div class="desc">Guide rails<small>Marks above &amp; below the focal point</small></div>
+          <label class="switch"><input type="checkbox" id="railToggle" checked><span class="track"></span></label>
+        </div>
+        <div class="toggle">
+          <div class="desc">Pause on punctuation<small>Extra beat at commas &amp; sentence ends</small></div>
+          <label class="switch"><input type="checkbox" id="punctToggle" checked><span class="track"></span></label>
+        </div>
+        <div class="toggle">
+          <div class="desc">Slow down long words<small>Give big words a little more time</small></div>
+          <label class="switch"><input type="checkbox" id="longToggle" checked><span class="track"></span></label>
+        </div>
+      </div>
+
+      <button class="ghostbtn" id="resetSettings">Reset to defaults</button>
+    </div>
+  </aside>
+
+  <!-- Library panel -->
+  <aside class="panel left" id="libraryPanel" aria-label="Library and import">
+    <div class="panel-head">
+      <h2>Library</h2>
+      <button class="iconbtn" data-close>✕</button>
+    </div>
+    <div class="panel-body">
+      <div class="dropzone" id="dropzone">
+        <b>Drop an EPUB or TXT here</b><br>or
+        <div><button class="primary" id="pickFile">Choose a file…</button></div>
+        <input type="file" id="fileInput" accept=".epub,.txt,.text,.html,.htm,.md" style="display:none" />
+      </div>
+
+      <div class="group">
+        <label class="title">Paste text</label>
+        <textarea class="paste" id="pasteArea" placeholder="Paste an article or chapter, then press Load…"></textarea>
+        <button class="primary" id="loadPaste" style="width:100%">Load pasted text</button>
+      </div>
+
+      <div class="group">
+        <label class="title">Your books</label>
+        <div class="lib" id="libList"><div class="empty">Nothing imported yet.</div></div>
+      </div>
+
+      <div class="note">
+        <b>About Kindle / Amazon:</b> Amazon has no public API to sign in and stream your
+        Kindle library, and Kindle books are DRM-protected — so no web app can pull that
+        content directly. Import books you own as <b>EPUB</b> or <b>TXT</b> (e.g. exported
+        from Calibre, Project Gutenberg, or your own files) and they read beautifully here.
+        Everything stays <b>on this device</b> — nothing is uploaded.
+      </div>
+    </div>
+  </aside>
+
+<script>
+"use strict";
+/* ============================================================
+   Word Runner — a minimal, Kindle-styled RSVP speed reader.
+   Single file, no build, no network. All data local.
+   ============================================================ */
+
+/* ---------- Kindle-style themes ---------- */
+const THEMES = {
+  white: { label: "White", bg:"#ffffff", fg:"#111111", muted:"#8a8a8a", panel:"#f4f4f4", line:"#e3e3e3", accent:"#c0392b", guide:"rgba(0,0,0,.16)", glyph:"Aa" },
+  sepia: { label: "Sepia", bg:"#fbf0d9", fg:"#5b4636", muted:"#9a8c74", panel:"#f3e6c8", line:"#e2d3ad", accent:"#c0392b", guide:"rgba(0,0,0,.18)", glyph:"Aa" },
+  green: { label: "Green", bg:"#d7e3d0", fg:"#37422e", muted:"#6f7a63", panel:"#cbd9c2", line:"#b6c6ab", accent:"#a23b2e", guide:"rgba(0,0,0,.18)", glyph:"Aa" },
+  black: { label: "Black", bg:"#000000", fg:"#d7d7d7", muted:"#7a7a7a", panel:"#151515", line:"#2b2b2b", accent:"#e0553f", guide:"rgba(255,255,255,.22)", glyph:"Aa" },
+};
+
+/* ---------- Kindle-style fonts (with web-safe fallbacks) ---------- */
+const FONTS = [
+  { id:"bookerly",  name:"Bookerly",   note:"Kindle default · serif", stack:"'Bookerly', 'Iowan Old Style', Georgia, 'Times New Roman', serif" },
+  { id:"georgia",   name:"Georgia",    note:"serif",                  stack:"Georgia, 'Times New Roman', serif" },
+  { id:"palatino",  name:"Palatino",   note:"serif",                  stack:"'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif" },
+  { id:"baskerville",name:"Baskerville",note:"serif",                 stack:"Baskerville, 'Baskerville Old Face', Georgia, serif" },
+  { id:"ember",     name:"Amazon Ember",note:"Kindle · sans",         stack:"'Amazon Ember', 'Helvetica Neue', Helvetica, Arial, sans-serif" },
+  { id:"helvetica", name:"Helvetica",  note:"sans",                   stack:"'Helvetica Neue', Helvetica, Arial, sans-serif" },
+  { id:"lato",      name:"Lato",       note:"sans",                   stack:"'Lato', 'Segoe UI', system-ui, sans-serif" },
+  { id:"dyslexic",  name:"OpenDyslexic",note:"accessible",            stack:"'OpenDyslexic', 'Comic Sans MS', 'Trebuchet MS', sans-serif" },
+];
+
+/* ---------- Default settings ---------- */
+const DEFAULTS = {
+  theme:"sepia", font:"bookerly", wpm:400, size:56, chunk:1, weight:400,
+  ls:0, contrast:100, orp:true, rail:true, punct:true, long:true,
+};
+
+/* ---------- State ---------- */
+const S = {
+  settings: loadSettings(),
+  words: [],            // token stream
+  meta: [],             // per-token: {delay multiplier}
+  idx: 0,
+  playing: false,
+  timer: null,
+  book: null,           // {id,title,progress}
+  chapters: [],         // [{title, startIdx}]
+};
+
+/* ---------- DOM refs ---------- */
+const $ = (id) => document.getElementById(id);
+const wordEl = $("word"), idleHint = $("idleHint"), runner = $("runner");
+const chapterCap = $("chapterCap"), chunkLabel = $("chunkLabel");
+
+/* ============================================================
+   SETTINGS  (persist + apply)
+   ============================================================ */
+function loadSettings() {
+  try { return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem("wr.settings")||"{}")); }
+  catch { return Object.assign({}, DEFAULTS); }
+}
+function saveSettings() { localStorage.setItem("wr.settings", JSON.stringify(S.settings)); }
+
+function applySettings() {
+  const t = THEMES[S.settings.theme] || THEMES.sepia;
+  const r = document.documentElement.style;
+  r.setProperty("--bg", t.bg);
+  r.setProperty("--fg", t.fg);
+  r.setProperty("--muted", t.muted);
+  r.setProperty("--panel", t.panel);
+  r.setProperty("--panel-line", t.line);
+  r.setProperty("--accent", t.accent);
+  r.setProperty("--guide", S.settings.rail ? t.guide : "transparent");
+  document.querySelector('meta[name=theme-color]').setAttribute("content", t.bg);
+
+  const f = FONTS.find(f => f.id === S.settings.font) || FONTS[0];
+  r.setProperty("--font", f.stack);
+  r.setProperty("--reader-size", S.settings.size + "px");
+  r.setProperty("--reader-weight", S.settings.weight);
+  r.setProperty("--letter-spacing", (S.settings.ls/100) + "em");
+  r.setProperty("--contrast", (S.settings.contrast/100));
+
+  // reflect into controls
+  $("wpm").value = S.settings.wpm; $("wpmOut").textContent = S.settings.wpm; $("wpmVal").textContent = S.settings.wpm;
+  $("size").value = S.settings.size; $("sizeOut").textContent = S.settings.size;
+  $("chunk").value = S.settings.chunk; $("chunkOut").textContent = S.settings.chunk;
+  $("chunkLabel").textContent = S.settings.chunk > 1 ? S.settings.chunk + " words/flash" : "";
+  $("weight").value = S.settings.weight; $("weightOut").textContent = weightName(S.settings.weight);
+  $("ls").value = S.settings.ls; $("lsOut").textContent = S.settings.ls;
+  $("contrast").value = S.settings.contrast; $("contrastOut").textContent = S.settings.contrast + "%";
+  $("orpToggle").checked = S.settings.orp;
+  $("railToggle").checked = S.settings.rail;
+  $("punctToggle").checked = S.settings.punct;
+  $("longToggle").checked = S.settings.long;
+
+  renderSwatches(); renderFonts();
+  if (!S.playing && S.words.length) renderWord(); // refresh current frame
+}
+function weightName(w){ return w<=300?"Light":w<=400?"Regular":w<=500?"Medium":w<=600?"Semibold":"Bold"; }
+
+function renderSwatches() {
+  const host = $("swatches"); host.innerHTML = "";
+  for (const [key, t] of Object.entries(THEMES)) {
+    const b = document.createElement("button");
+    b.className = "swatch" + (S.settings.theme===key ? " sel":"");
+    b.style.background = t.bg; b.style.color = t.fg;
+    b.innerHTML = `Aa<small>${t.label}</small>`;
+    b.onclick = () => { S.settings.theme = key; saveSettings(); applySettings(); };
+    host.appendChild(b);
+  }
+}
+function renderFonts() {
+  const host = $("fonts"); host.innerHTML = "";
+  for (const f of FONTS) {
+    const b = document.createElement("button");
+    b.className = "fontopt" + (S.settings.font===f.id ? " sel":"");
+    b.style.fontFamily = f.stack;
+    b.innerHTML = `<span>${f.name}</span><small>${f.note}</small>`;
+    b.onclick = () => { S.settings.font = f.id; saveSettings(); applySettings(); };
+    host.appendChild(b);
+  }
+}
+
+/* ============================================================
+   TEXT → TOKENS  (with pacing metadata)
+   ============================================================ */
+function tokenize(text) {
+  // Normalize whitespace, keep paragraph boundaries as a strong pause.
+  const paras = text.replace(/\r/g,"").split(/\n{2,}/);
+  const words = [], meta = [], paraEnds = new Set();
+  paras.forEach((p, pi) => {
+    const toks = p.replace(/\n/g," ").trim().split(/\s+/).filter(Boolean);
+    toks.forEach(w => { words.push(w); meta.push(pacing(w, false)); });
+    if (pi < paras.length-1 && toks.length) {
+      // mark last token of paragraph for a longer rest
+      paraEnds.add(words.length-1);
+      meta[meta.length-1] = pacing(words[words.length-1], true);
+    }
+  });
+  return { words, meta, paraEnds };
+}
+function pacing(word, paraEnd) {
+  let mult = 1;
+  const len = word.replace(/[^\p{L}\p{N}]/gu,"").length;
+  if (S.settings.long && len > 8)  mult += Math.min((len-8)*0.06, 0.7);
+  if (S.settings.punct) {
+    if (/[,;:—–)]$/.test(word)) mult += 0.55;
+    if (/[.!?"'”’]$/.test(word)) mult += 1.0;
+  }
+  if (paraEnd) mult += 1.4;
+  return mult;
+}
+
+/* Optimal Recognition Point — where to place the red pivot letter */
+function orpIndex(word) {
+  const n = word.length;
+  if (n <= 1) return 0;
+  if (n <= 5) return 1;
+  if (n <= 9) return 2;
+  if (n <= 13) return 3;
+  return 4;
+}
+
+/* ============================================================
+   RENDER a frame (one flash = `chunk` words)
+   ============================================================ */
+function renderWord() {
+  const chunk = S.settings.chunk;
+  const slice = S.words.slice(S.idx, S.idx + chunk);
+  if (!slice.length) return;
+
+  if (!S.settings.orp || chunk > 1) {
+    // Multi-word or ORP off: pivot on the middle word's ORP for stability
+    const joined = slice.join(" ");
+    if (S.settings.orp) {
+      // anchor using first word ORP
+      const w0 = slice[0], k = orpIndex(w0);
+      const rest = joined.slice(w0.length);
+      wordEl.innerHTML =
+        `<span class="pre">${esc(w0.slice(0,k))}</span>` +
+        `<span class="orp">${esc(w0[k]||"")}</span>` +
+        `<span class="post">${esc(w0.slice(k+1))+esc(rest)}</span>`;
+    } else {
+      wordEl.innerHTML = `<span class="post" style="text-align:center">${esc(joined)}</span>`;
+    }
+    centerPivot();
+  } else {
+    const w = slice[0], k = orpIndex(w);
+    wordEl.innerHTML =
+      `<span class="pre">${esc(w.slice(0,k))}</span>` +
+      `<span class="orp">${esc(w[k]||"")}</span>` +
+      `<span class="post">${esc(w.slice(k+1))}</span>`;
+    centerPivot();
+  }
+  idleHint.style.display = "none";
+  wordEl.style.display = "inline-flex";
+  updateChapterCap();
+  updateScrub();
+}
+function esc(s){ return (s||"").replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+/* Pin the pivot letter to horizontal centre of the runner. */
+function centerPivot() {
+  const orp = wordEl.querySelector(".orp");
+  if (!orp || !S.settings.orp) { wordEl.style.transform = "translateX(0)"; return; }
+  // measure after layout
+  requestAnimationFrame(() => {
+    const rRect = runner.getBoundingClientRect();
+    const oRect = orp.getBoundingClientRect();
+    const orpCenter = oRect.left + oRect.width/2;
+    const target = rRect.left + rRect.width/2;
+    const cur = getComputedStyle(wordEl).transform;
+    let base = 0;
+    if (cur && cur !== "none") { const m = new DOMMatrixReadOnly(cur); base = m.m41; }
+    wordEl.style.transform = `translateX(${base + (target - orpCenter)}px)`;
+  });
+}
+
+function updateChapterCap() {
+  if (!S.chapters.length) { chapterCap.textContent = ""; return; }
+  let cur = S.chapters[0];
+  for (const c of S.chapters) { if (c.startIdx <= S.idx) cur = c; else break; }
+  chapterCap.textContent = cur ? cur.title : "";
+}
+
+/* ============================================================
+   PLAYBACK ENGINE
+   ============================================================ */
+function baseInterval() { return 60000 / S.settings.wpm; }
+
+function step() {
+  if (S.idx >= S.words.length) { pause(); S.idx = S.words.length; updateScrub(); return; }
+  renderWord();
+  const m = S.meta[S.idx] || 1;
+  S.idx += S.settings.chunk;
+  const wait = baseInterval() * m * (S.settings.chunk > 1 ? S.settings.chunk*0.9 : 1);
+  S.timer = setTimeout(step, wait);
+  persistProgress();
+}
+function play() {
+  if (!S.words.length) { openPanel("libraryPanel"); return; }
+  if (S.idx >= S.words.length) S.idx = 0;
+  S.playing = true; $("playpause").textContent = "❚❚";
+  step();
+}
+function pause() {
+  S.playing = false; clearTimeout(S.timer); S.timer = null;
+  $("playpause").textContent = "▶";
+}
+function toggle() { S.playing ? pause() : play(); }
+
+function seek(i) {
+  S.idx = Math.max(0, Math.min(i, S.words.length));
+  if (S.words.length) renderWord();
+  updateScrub(); persistProgress();
+}
+function backSentence() { seek(findSentence(-1)); }
+function fwdSentence() { seek(findSentence(1)); }
+function findSentence(dir) {
+  let i = S.idx + dir;
+  while (i > 0 && i < S.words.length) {
+    if (/[.!?]["'”’)]?$/.test(S.words[i-1])) break;
+    i += dir;
+  }
+  return Math.max(0, i);
+}
+
+/* ---------- Scrubber / time ---------- */
+function updateScrub() {
+  const sc = $("scrubber");
+  sc.max = Math.max(0, S.words.length - 1);
+  sc.value = Math.min(S.idx, sc.max);
+  const per = baseInterval()/1000;
+  const done = S.idx * per;
+  const total = S.words.length * per;
+  $("elapsed").textContent = fmt(done);
+  $("remaining").textContent = "-" + fmt(Math.max(0, total - done));
+}
+function fmt(sec) {
+  sec = Math.round(sec);
+  const m = Math.floor(sec/60), s = sec%60;
+  if (m >= 60){ const h=Math.floor(m/60); return `${h}:${String(m%60).padStart(2,"0")}:${String(s).padStart(2,"0")}`; }
+  return `${m}:${String(s).padStart(2,"0")}`;
+}
+
+/* ============================================================
+   BOOK LOADING  (paste / TXT / EPUB)
+   ============================================================ */
+function loadText(title, text, chapters) {
+  const { words, meta, paraEnds } = tokenize(text);
+  if (!words.length) { alert("No readable text found."); return; }
+  S.words = words; S.meta = meta; S._paraEnds = paraEnds; S.idx = 0;
+  S.chapters = chapters || [];
+  S.book = { id: title + "|" + words.length, title };
+  $("bookTitle").textContent = title;
+  pause(); renderWord(); updateScrub();
+  closePanels();
+}
+
+function recomputeMeta() {
+  // pacing depends on settings (punct / long); rebuild multipliers in place.
+  if (!S.words.length) return;
+  // find paragraph-end tokens from existing big multipliers isn't reliable; re-tokenize source if we have it.
+  // Simpler: recompute per-word without paragraph info (kept in S._paraEnds if available)
+  S.meta = S.words.map((w,i)=> pacing(w, S._paraEnds ? S._paraEnds.has(i) : false));
+}
+
+async function handleFile(file) {
+  const name = file.name.replace(/\.[^.]+$/, "");
+  const ext = (file.name.split(".").pop()||"").toLowerCase();
+  try {
+    if (ext === "epub") {
+      const buf = await file.arrayBuffer();
+      const { text, chapters, title } = await parseEpub(buf);
+      const t = title || name;
+      loadText(t, text, chapters);
+      saveBook(t, text, chapters);
+    } else {
+      const text = await file.text();
+      const clean = /html?$/.test(ext) ? stripHtml(text) : text;
+      loadText(name, clean, []);
+      saveBook(name, clean, []);
+    }
+  } catch (e) {
+    console.error(e);
+    alert("Could not read that file: " + e.message);
+  }
+}
+
+function stripHtml(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("script,style,head").forEach(n=>n.remove());
+  // Preserve paragraph breaks
+  doc.querySelectorAll("p,div,br,h1,h2,h3,h4,li").forEach(n => n.after(document.createTextNode("\n\n")));
+  return (doc.body ? doc.body.textContent : doc.textContent).replace(/\n{3,}/g,"\n\n").trim();
+}
+
+/* ============================================================
+   EPUB PARSER  (in-browser ZIP via DecompressionStream)
+   ============================================================ */
+async function parseEpub(buf) {
+  const files = await unzip(new Uint8Array(buf));
+  const dec = new TextDecoder("utf-8");
+
+  // 1. container.xml -> OPF path
+  const containerBytes = files.get("META-INF/container.xml");
+  if (!containerBytes) throw new Error("not a valid EPUB (no container.xml)");
+  const container = new DOMParser().parseFromString(dec.decode(containerBytes), "application/xml");
+  const opfPath = container.querySelector("rootfile")?.getAttribute("full-path");
+  if (!opfPath) throw new Error("EPUB missing OPF path");
+
+  const opfBytes = files.get(opfPath);
+  const opf = new DOMParser().parseFromString(dec.decode(opfBytes), "application/xml");
+  const baseDir = opfPath.includes("/") ? opfPath.replace(/\/[^/]*$/,"/") : "";
+
+  const title = opf.querySelector("metadata > *|title, title")?.textContent?.trim();
+
+  // 2. manifest id -> href
+  const manifest = {};
+  opf.querySelectorAll("manifest > item").forEach(it => {
+    manifest[it.getAttribute("id")] = it.getAttribute("href");
+  });
+  // 3. spine order
+  const spine = [...opf.querySelectorAll("spine > itemref")].map(r => r.getAttribute("idref"));
+
+  const parts = [];
+  const chapters = [];
+  let running = 0;
+  for (const id of spine) {
+    let href = manifest[id]; if (!href) continue;
+    href = decodeURIComponent(href.split("#")[0]);
+    const path = normalizePath(baseDir + href);
+    const bytes = files.get(path) || files.get(href);
+    if (!bytes) continue;
+    const html = dec.decode(bytes);
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    doc.querySelectorAll("script,style").forEach(n=>n.remove());
+    const heading = doc.querySelector("h1,h2,h3,title")?.textContent?.trim();
+    doc.querySelectorAll("p,div,br,h1,h2,h3,h4,li").forEach(n => n.after(document.createTextNode("\n\n")));
+    const chapText = (doc.body?.textContent||"").replace(/\n{3,}/g,"\n\n").trim();
+    if (!chapText) continue;
+    const wc = chapText.split(/\s+/).filter(Boolean).length;
+    chapters.push({ title: heading || ("Section "+(chapters.length+1)), startIdx: running });
+    running += wc;
+    parts.push(chapText);
+  }
+  return { text: parts.join("\n\n"), chapters, title };
+}
+
+function normalizePath(p) {
+  const parts = p.split("/"); const out = [];
+  for (const seg of parts) {
+    if (seg === "..") out.pop();
+    else if (seg !== "." && seg !== "") out.push(seg);
+  }
+  return out.join("/");
+}
+
+/* Minimal ZIP reader: parse central directory, inflate entries. */
+async function unzip(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // locate End Of Central Directory
+  let eocd = -1;
+  for (let i = bytes.length - 22; i >= 0 && i > bytes.length - 22 - 65536; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error("EPUB is not a valid zip");
+  const cdCount = dv.getUint16(eocd + 10, true);
+  let ptr = dv.getUint32(eocd + 16, true);
+
+  const entries = [];
+  for (let i = 0; i < cdCount; i++) {
+    if (dv.getUint32(ptr, true) !== 0x02014b50) break;
+    const method = dv.getUint16(ptr + 10, true);
+    const compSize = dv.getUint32(ptr + 20, true);
+    const nameLen = dv.getUint16(ptr + 28, true);
+    const extraLen = dv.getUint16(ptr + 30, true);
+    const commentLen = dv.getUint16(ptr + 32, true);
+    const localOff = dv.getUint32(ptr + 42, true);
+    const name = new TextDecoder().decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen));
+    entries.push({ name, method, compSize, localOff });
+    ptr += 46 + nameLen + extraLen + commentLen;
+  }
+
+  const out = new Map();
+  for (const e of entries) {
+    if (e.name.endsWith("/")) continue;
+    // read local header to find real data offset
+    const lh = e.localOff;
+    if (dv.getUint32(lh, true) !== 0x04034b50) continue;
+    const lNameLen = dv.getUint16(lh + 26, true);
+    const lExtraLen = dv.getUint16(lh + 28, true);
+    const dataStart = lh + 30 + lNameLen + lExtraLen;
+    const comp = bytes.subarray(dataStart, dataStart + e.compSize);
+    let data;
+    if (e.method === 0) data = comp;
+    else if (e.method === 8) data = await inflateRaw(comp);
+    else continue;
+    out.set(e.name, data);
+  }
+  return out;
+}
+
+async function inflateRaw(bytes) {
+  const ds = new DecompressionStream("deflate-raw");
+  const stream = new Blob([bytes]).stream().pipeThrough(ds);
+  const ab = await new Response(stream).arrayBuffer();
+  return new Uint8Array(ab);
+}
+
+/* ============================================================
+   LOCAL LIBRARY  (IndexedDB for text, localStorage for index)
+   ============================================================ */
+const DB_NAME = "wordrunner", STORE = "books";
+function db() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(STORE, { keyPath:"id" });
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function saveBook(title, text, chapters) {
+  const id = "b_" + Math.abs(hash(title + text.length)).toString(36);
+  const rec = { id, title, text, chapters: chapters||[], progress: 0, added: Date.now(), words: text.split(/\s+/).length };
+  const d = await db();
+  await tx(d, "readwrite", s => s.put(rec));
+  S.book = { id, title };
+  refreshLibrary();
+}
+async function persistProgress() {
+  if (!S.book || !S.book.id || !S.words.length) return;
+  const pct = S.idx / S.words.length;
+  const key = "wr.prog." + S.book.id;
+  localStorage.setItem(key, String(pct));
+  // throttle DB writes
+  if (!persistProgress._t) persistProgress._t = setTimeout(async () => {
+    persistProgress._t = null;
+    try {
+      const d = await db();
+      const rec = await tx(d, "readwrite", s => s.get(S.book.id), true);
+      if (rec) { rec.progress = pct; rec.idx = S.idx; await tx(d, "readwrite", s => s.put(rec)); }
+      refreshLibrary();
+    } catch {}
+  }, 1200);
+}
+function tx(d, mode, fn, wantResult) {
+  return new Promise((res, rej) => {
+    const t = d.transaction(STORE, mode);
+    const s = t.objectStore(STORE);
+    const req = fn(s);
+    if (wantResult) { req.onsuccess = () => res(req.result); req.onerror = () => rej(req.error); }
+    else { t.oncomplete = () => res(); t.onerror = () => rej(t.error); }
+  });
+}
+async function refreshLibrary() {
+  const d = await db();
+  const all = await tx(d, "readonly", s => s.getAll(), true);
+  const host = $("libList"); host.innerHTML = "";
+  if (!all || !all.length) { host.innerHTML = '<div class="empty">Nothing imported yet.</div>'; return; }
+  all.sort((a,b)=> (b.added||0)-(a.added||0));
+  for (const rec of all) {
+    const pct = Math.round((rec.progress||0)*100);
+    const el = document.createElement("div"); el.className = "libitem";
+    el.innerHTML = `<div class="meta"><strong>${esc(rec.title)}</strong>
+      <span>${(rec.words||0).toLocaleString()} words${pct?` · ${pct}% read`:""}</span></div>
+      <button class="del" title="Remove">🗑</button>`;
+    el.querySelector(".meta").onclick = () => openBook(rec);
+    el.querySelector(".del").onclick = async (ev) => {
+      ev.stopPropagation();
+      const dd = await db(); await tx(dd, "readwrite", s => s.delete(rec.id)); refreshLibrary();
+    };
+    host.appendChild(el);
+  }
+}
+function openBook(rec) {
+  const { words, meta, paraEnds } = tokenize(rec.text);
+  S.words = words; S.meta = meta; S._paraEnds = paraEnds;
+  S.chapters = rec.chapters || [];
+  S.book = { id: rec.id, title: rec.title };
+  const savedIdx = rec.idx || Math.floor((parseFloat(localStorage.getItem("wr.prog."+rec.id)||"0"))*words.length);
+  S.idx = Math.min(savedIdx||0, words.length-1);
+  $("bookTitle").textContent = rec.title;
+  pause(); renderWord(); updateScrub(); closePanels();
+}
+function hash(str){ let h=0; str=String(str); for(let i=0;i<str.length;i++){h=(h<<5)-h+str.charCodeAt(i)|0;} return h; }
+
+/* ============================================================
+   PANELS + EVENTS
+   ============================================================ */
+function openPanel(id) {
+  closePanels();
+  $(id).classList.add("open"); $("overlay").classList.add("open");
+}
+function closePanels() {
+  document.querySelectorAll(".panel").forEach(p=>p.classList.remove("open"));
+  $("overlay").classList.remove("open");
+}
+
+$("openSettings").onclick = () => openPanel("settingsPanel");
+$("openLibrary").onclick = () => openPanel("libraryPanel");
+$("overlay").onclick = closePanels;
+document.querySelectorAll("[data-close]").forEach(b=>b.onclick=closePanels);
+
+$("playpause").onclick = toggle;
+$("restart").onclick = () => { seek(0); };
+$("backSent").onclick = backSentence;
+$("fwdSent").onclick = fwdSentence;
+$("scrubber").oninput = (e) => { pause(); seek(parseInt(e.target.value,10)); };
+
+/* Settings sliders */
+$("wpm").oninput = e => { S.settings.wpm = +e.target.value; $("wpmOut").textContent = e.target.value; $("wpmVal").textContent = e.target.value; saveSettings(); updateScrub(); };
+$("size").oninput = e => { S.settings.size = +e.target.value; $("sizeOut").textContent = e.target.value; document.documentElement.style.setProperty("--reader-size", e.target.value+"px"); saveSettings(); if(S.words.length) renderWord(); };
+$("chunk").oninput = e => { S.settings.chunk = +e.target.value; $("chunkOut").textContent = e.target.value; $("chunkLabel").textContent = +e.target.value>1 ? e.target.value+" words/flash":""; saveSettings(); if(S.words.length) renderWord(); };
+$("weight").oninput = e => { S.settings.weight = +e.target.value; $("weightOut").textContent = weightName(+e.target.value); document.documentElement.style.setProperty("--reader-weight", e.target.value); saveSettings(); };
+$("ls").oninput = e => { S.settings.ls = +e.target.value; $("lsOut").textContent = e.target.value; document.documentElement.style.setProperty("--letter-spacing", (+e.target.value/100)+"em"); saveSettings(); if(S.words.length) renderWord(); };
+$("contrast").oninput = e => { S.settings.contrast = +e.target.value; $("contrastOut").textContent = e.target.value+"%"; document.documentElement.style.setProperty("--contrast", (+e.target.value/100)); saveSettings(); };
+$("orpToggle").onchange = e => { S.settings.orp = e.target.checked; saveSettings(); if(S.words.length) renderWord(); };
+$("railToggle").onchange = e => { S.settings.rail = e.target.checked; saveSettings(); applySettings(); };
+$("punctToggle").onchange = e => { S.settings.punct = e.target.checked; saveSettings(); recomputeMeta(); };
+$("longToggle").onchange = e => { S.settings.long = e.target.checked; saveSettings(); recomputeMeta(); };
+$("resetSettings").onclick = () => { S.settings = Object.assign({}, DEFAULTS); saveSettings(); applySettings(); recomputeMeta(); };
+
+/* Import */
+$("pickFile").onclick = () => $("fileInput").click();
+$("fileInput").onchange = e => { if (e.target.files[0]) handleFile(e.target.files[0]); };
+$("loadPaste").onclick = () => {
+  const t = $("pasteArea").value.trim();
+  if (!t) return;
+  loadText("Pasted text", t, []); saveBook("Pasted text · " + new Date().toLocaleDateString(), t, []);
+};
+const dz = $("dropzone");
+["dragenter","dragover"].forEach(ev => dz.addEventListener(ev, e=>{e.preventDefault(); dz.classList.add("hot");}));
+["dragleave","drop"].forEach(ev => dz.addEventListener(ev, e=>{e.preventDefault(); dz.classList.remove("hot");}));
+dz.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) handleFile(f); });
+// allow dropping anywhere
+window.addEventListener("dragover", e=>e.preventDefault());
+window.addEventListener("drop", e=>{ e.preventDefault(); if(!$("libraryPanel").classList.contains("open") && e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
+
+/* Keyboard */
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "TEXTAREA") return;
+  switch (e.key) {
+    case " ": e.preventDefault(); toggle(); break;
+    case "ArrowLeft": e.preventDefault(); backSentence(); break;
+    case "ArrowRight": e.preventDefault(); fwdSentence(); break;
+    case "ArrowUp": e.preventDefault(); $("wpm").value = S.settings.wpm = Math.min(1000, S.settings.wpm+20); $("wpm").dispatchEvent(new Event("input")); break;
+    case "ArrowDown": e.preventDefault(); $("wpm").value = S.settings.wpm = Math.max(100, S.settings.wpm-20); $("wpm").dispatchEvent(new Event("input")); break;
+    case "s": case "S": openPanel("settingsPanel"); break;
+    case "l": case "L": openPanel("libraryPanel"); break;
+    case "Escape": closePanels(); break;
+  }
+});
+runner.addEventListener("click", () => { if (S.words.length) toggle(); });
+
+/* ---------- Boot ---------- */
+applySettings();
+refreshLibrary();
+window.addEventListener("resize", () => { if (S.words.length) renderWord(); });
+</script>
+</body>
+</html>
