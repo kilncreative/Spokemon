@@ -357,9 +357,12 @@
     </div>
     <div class="panel-body">
       <div class="dropzone" id="dropzone">
-        <b>Drop a book here</b><br><span style="font-size:12px">EPUB · AZW3 · AZW · MOBI · TXT</span>
-        <div><button class="primary" id="pickFile">Choose a file…</button></div>
-        <input type="file" id="fileInput" accept=".epub,.azw3,.azw,.mobi,.prc,.txt,.text,.html,.htm,.md" style="display:none" />
+        <b>Drop books here</b><br><span style="font-size:12px">EPUB · AZW3 · AZW · MOBI · TXT — one or many</span>
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+          <button class="primary" id="pickFile">Choose files…</button>
+          <button class="ghostbtn" id="pickFolder" style="display:none">Import folder…</button>
+        </div>
+        <input type="file" id="fileInput" accept=".epub,.azw3,.azw,.mobi,.prc,.txt,.text,.html,.htm,.md" multiple style="display:none" />
       </div>
 
       <div class="group">
@@ -687,40 +690,72 @@ function recomputeMeta() {
   S.meta = S.words.map((w,i)=> pacing(w, S._paraEnds ? S._paraEnds.has(i) : false));
 }
 
-async function handleFile(file) {
+/* Parse any supported file into { title, text, chapters }. Throws on failure. */
+async function parseAnyFile(file) {
   const name = file.name.replace(/\.[^.]+$/, "");
   const ext = (file.name.split(".").pop()||"").toLowerCase();
-  try {
-    if (ext === "epub") {
-      const buf = await file.arrayBuffer();
-      const { text, chapters, title } = await parseEpub(buf);
-      const t = title || name;
-      loadText(t, text, chapters);
-      saveBook(t, text, chapters);
-    } else if (["azw3","azw","mobi","prc"].includes(ext)) {
-      const buf = await file.arrayBuffer();
-      let res;
-      try { res = parseMobi(buf); }
-      catch (e) {
-        if (e.message === "DRM")
-          throw new Error("This Kindle file still has Amazon DRM on it. Strip it with Calibre + the DeDRM plugin, export EPUB, and drop that in. See IMPORTING-KINDLE-BOOKS.md (linked in Library).");
-        if (e.message === "HUFF")
-          throw new Error("This file uses HUFF/CDIC compression I can't unpack in the browser. Convert it to EPUB in Calibre and import that — same result.");
-        throw e;
-      }
-      const t = res.title || name;
-      loadText(t, res.text, res.chapters);
-      saveBook(t, res.text, res.chapters);
-    } else {
-      const text = await file.text();
-      const clean = /html?$/.test(ext) ? stripHtml(text) : text;
-      loadText(name, clean, []);
-      saveBook(name, clean, []);
-    }
-  } catch (e) {
-    console.error(e);
-    alert("Could not read that file: " + e.message);
+  if (ext === "epub") {
+    const { text, chapters, title } = await parseEpub(await file.arrayBuffer());
+    return { title: title || name, text, chapters };
   }
+  if (["azw3","azw","mobi","prc"].includes(ext)) {
+    let res;
+    try { res = parseMobi(await file.arrayBuffer()); }
+    catch (e) {
+      if (e.message === "DRM")
+        throw new Error("still has Amazon DRM — strip it with Calibre + DeDRM and import the EPUB (see IMPORTING-KINDLE-BOOKS.md).");
+      if (e.message === "HUFF")
+        throw new Error("uses HUFF/CDIC compression the browser can't unpack — convert it to EPUB in Calibre.");
+      throw e;
+    }
+    return { title: res.title || name, text: res.text, chapters: res.chapters };
+  }
+  const text = await file.text();
+  return { title: name, text: /html?$/.test(ext) ? stripHtml(text) : text, chapters: [] };
+}
+
+/* Import one or many files. A single file starts reading; a batch just fills
+   the library (bulk / folder import). */
+async function importFiles(fileList) {
+  const files = [...fileList].filter(f =>
+    /\.(epub|azw3|azw|mobi|prc|txt|text|html?|md)$/i.test(f.name));
+  if (!files.length) { alert("No supported book files found."); return; }
+  const activate = files.length === 1;
+  let ok = 0; const failed = [];
+  for (let i = 0; i < files.length; i++) {
+    try {
+      const r = await parseAnyFile(files[i]);
+      if (!r.text || !r.text.trim()) throw new Error("no readable text");
+      await saveBook(r.title, r.text, r.chapters);
+      if (activate) loadText(r.title, r.text, r.chapters);
+      ok++;
+    } catch (e) { failed.push(files[i].name + " — " + e.message); }
+  }
+  await refreshLibrary();
+  if (!activate) {
+    let msg = `Imported ${ok} book${ok===1?"":"s"} into your library.`;
+    if (failed.length) msg += `\n\nSkipped ${failed.length}:\n• ` + failed.join("\n• ");
+    alert(msg);
+  } else if (failed.length) {
+    alert("Could not read that file: " + failed[0].split(" — ").slice(1).join(" — "));
+  }
+}
+
+/* Pick a whole folder and import every book in it (Chromium desktop). */
+async function importFolder() {
+  if (!window.showDirectoryPicker) return;
+  let dir;
+  try { dir = await window.showDirectoryPicker(); } catch { return; }
+  const files = [];
+  async function walk(handle) {
+    for await (const [name, h] of handle.entries()) {
+      if (h.kind === "file" && /\.(epub|azw3|azw|mobi|prc|txt)$/i.test(name)) files.push(await h.getFile());
+      else if (h.kind === "directory") await walk(h);
+    }
+  }
+  await walk(dir);
+  if (!files.length) { alert("No books found in that folder."); return; }
+  importFiles(files);
 }
 
 /* ============================================================
@@ -1088,7 +1123,8 @@ $("resetSettings").onclick = () => { S.settings = Object.assign({}, DEFAULTS); s
 
 /* Import */
 $("pickFile").onclick = () => $("fileInput").click();
-$("fileInput").onchange = e => { if (e.target.files[0]) handleFile(e.target.files[0]); };
+$("fileInput").onchange = e => { if (e.target.files.length) importFiles(e.target.files); e.target.value = ""; };
+if (window.showDirectoryPicker) { $("pickFolder").style.display = ""; $("pickFolder").onclick = importFolder; }
 $("loadPaste").onclick = () => {
   const t = $("pasteArea").value.trim();
   if (!t) return;
@@ -1097,10 +1133,10 @@ $("loadPaste").onclick = () => {
 const dz = $("dropzone");
 ["dragenter","dragover"].forEach(ev => dz.addEventListener(ev, e=>{e.preventDefault(); dz.classList.add("hot");}));
 ["dragleave","drop"].forEach(ev => dz.addEventListener(ev, e=>{e.preventDefault(); dz.classList.remove("hot");}));
-dz.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) handleFile(f); });
+dz.addEventListener("drop", e => { if (e.dataTransfer.files.length) importFiles(e.dataTransfer.files); });
 // allow dropping anywhere
 window.addEventListener("dragover", e=>e.preventDefault());
-window.addEventListener("drop", e=>{ e.preventDefault(); if(!$("libraryPanel").classList.contains("open") && e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
+window.addEventListener("drop", e=>{ e.preventDefault(); if(!$("libraryPanel").classList.contains("open") && e.dataTransfer.files.length) importFiles(e.dataTransfer.files); });
 
 /* Keyboard */
 document.addEventListener("keydown", e => {

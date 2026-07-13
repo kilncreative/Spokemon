@@ -68,21 +68,55 @@ It's parsed on your device, saved locally, and ready to run. Nothing is uploaded
 
 ---
 
-## Batch converting (optional, command line)
+## Automating it
 
-With Calibre + DeDRM installed, `ebook-convert` runs the input-type plugins,
-so it de-DRMs on the way through:
+What can and can't be automated, honestly:
+
+| Step | Automatable? |
+| --- | --- |
+| Downloading purchases off Amazon | **No, not cleanly.** Amazon dropped "Download & transfer via USB" for most accounts in 2025 and has no official API. You copy files off a Kindle over USB or the desktop app. |
+| Stripping DRM + converting to EPUB | **Yes** — a watch-folder script (below). |
+| Loading a whole library into the app | **Yes** — the app's bulk / folder import. |
+
+### 1. Auto-convert with a watch folder
+
+`tools/kindle-sync.sh` (macOS/Linux) and `tools/kindle-sync.ps1` (Windows) watch
+an **inbox** folder and convert anything you drop in — DRM stripped, clean EPUB
+out — into an **outbox** folder. Nothing manual per book.
 
 ```bash
-# one file
-ebook-convert "Book.azw3" "Book.epub"
-
-# a whole folder
-for f in *.azw3 *.azw *.mobi; do ebook-convert "$f" "${f%.*}.epub"; done
+# macOS / Linux — keep it running; drop Kindle files into the inbox anytime
+IN=~/Kindle-Inbox OUT=~/Word-Runner-Books ./tools/kindle-sync.sh --watch
+```
+```powershell
+# Windows
+.\tools\kindle-sync.ps1 -In C:\Kindle-Inbox -Out C:\Word-Runner-Books -Watch
 ```
 
-If a specific file still reports DRM from the CLI, add it through the Calibre
-GUI once (which definitely triggers DeDRM), then export.
+Requires Calibre + DeDRM installed with your Kindle serial (steps 2–3). To run
+it on login, add it to your startup items / Task Scheduler / a `launchd` or
+`systemd --user` unit.
+
+### 2. Let the books follow you to your phone
+
+Point the **outbox** at a cloud-synced folder — **iCloud Drive**, **Google
+Drive**, **Dropbox**, or **Syncthing**. Converted EPUBs then appear in the Files
+app on your phone automatically.
+
+### 3. Bulk-import into the app
+
+- **On a computer (Chrome/Edge):** Library → **Import folder…** → pick the
+  outbox once. Every book in it is imported in one go.
+- **Anywhere, incl. phone:** Library → **Choose files…** → multi-select the
+  EPUBs (from the Files app on iOS/Android). Or drag a pile of files onto the
+  window.
+
+So the steady-state loop is: copy new purchases into the inbox → they auto-convert
+and cloud-sync → open the app and multi-select. The only unavoidable manual part
+is getting the files off Amazon in the first place.
+
+If a specific file still reports DRM from the script, add it through the Calibre
+GUI once (which definitely triggers DeDRM), then re-run.
 
 ## Troubleshooting
 
