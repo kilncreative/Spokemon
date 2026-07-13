@@ -357,12 +357,12 @@
     </div>
     <div class="panel-body">
       <div class="dropzone" id="dropzone">
-        <b>Drop books here</b><br><span style="font-size:12px">EPUB · AZW3 · AZW · MOBI · TXT — one or many</span>
+        <b>Drop books here</b><br><span style="font-size:12px">PDF · EPUB · AZW3 · AZW · MOBI · TXT — one or many</span>
         <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
           <button class="primary" id="pickFile">Choose files…</button>
           <button class="ghostbtn" id="pickFolder" style="display:none">Import folder…</button>
         </div>
-        <input type="file" id="fileInput" accept=".epub,.azw3,.azw,.mobi,.prc,.txt,.text,.html,.htm,.md" multiple style="display:none" />
+        <input type="file" id="fileInput" accept=".pdf,.epub,.azw3,.azw,.mobi,.prc,.txt,.text,.html,.htm,.md" multiple style="display:none" />
       </div>
 
       <div class="group">
@@ -377,6 +377,9 @@
       </div>
 
       <div class="note">
+        <b>PDFs</b> convert automatically — the text is extracted on-device and its
+        bookmarks become chapters (scanned image-only PDFs have no text to pull).
+        <br><br>
         <b>Getting your Kindle books in:</b> drop in a Kindle file (<b>.azw3 / .azw / .mobi</b>)
         and it reads directly. Amazon wraps purchased books in DRM, so a DRM-protected file
         needs one prep step: run it through <b>Calibre + the DeDRM plugin</b> and export an
@@ -387,12 +390,15 @@
     </div>
   </aside>
 
+<!-- Mozilla pdf.js (vendored locally) — powers PDF text extraction -->
+<script src="vendor/pdf.min.js"></script>
 <script>
 "use strict";
 /* ============================================================
    Word Runner — a minimal, Kindle-styled RSVP speed reader.
-   Single file, no build, no network. All data local.
+   Local-first: all parsing and storage happen on this device.
    ============================================================ */
+if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 
 /* ---------- Kindle-style themes ---------- */
 const THEMES = {
@@ -694,6 +700,7 @@ function recomputeMeta() {
 async function parseAnyFile(file) {
   const name = file.name.replace(/\.[^.]+$/, "");
   const ext = (file.name.split(".").pop()||"").toLowerCase();
+  if (ext === "pdf") return await parsePdf(file, name);
   if (ext === "epub") {
     const { text, chapters, title } = await parseEpub(await file.arrayBuffer());
     return { title: title || name, text, chapters };
@@ -718,7 +725,7 @@ async function parseAnyFile(file) {
    the library (bulk / folder import). */
 async function importFiles(fileList) {
   const files = [...fileList].filter(f =>
-    /\.(epub|azw3|azw|mobi|prc|txt|text|html?|md)$/i.test(f.name));
+    /\.(pdf|epub|azw3|azw|mobi|prc|txt|text|html?|md)$/i.test(f.name));
   if (!files.length) { alert("No supported book files found."); return; }
   const activate = files.length === 1;
   let ok = 0; const failed = [];
@@ -749,7 +756,7 @@ async function importFolder() {
   const files = [];
   async function walk(handle) {
     for await (const [name, h] of handle.entries()) {
-      if (h.kind === "file" && /\.(epub|azw3|azw|mobi|prc|txt)$/i.test(name)) files.push(await h.getFile());
+      if (h.kind === "file" && /\.(pdf|epub|azw3|azw|mobi|prc|txt)$/i.test(name)) files.push(await h.getFile());
       else if (h.kind === "directory") await walk(h);
     }
   }
@@ -885,6 +892,81 @@ function htmlToBook(html, title) {
   body.querySelectorAll("p,div,br,h1,h2,h3,h4,li").forEach(n => n.after(document.createTextNode("\n\n")));
   const text = (body.textContent || "").replace(/\n{3,}/g, "\n\n").trim();
   return { text, chapters, title };
+}
+
+/* ============================================================
+   PDF PARSER  (Mozilla pdf.js — robust text extraction)
+   Extracts the reading text page by page, reflows wrapped lines
+   into paragraphs, de-hyphenates line breaks, and turns the PDF
+   outline (bookmarks) into chapter jump points.
+   ============================================================ */
+async function parsePdf(file, name) {
+  if (!window.pdfjsLib) throw new Error("PDF engine failed to load — reload the page and try again.");
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+
+  const pageStart = new Array(pdf.numPages + 1).fill(0); // words before page p (1-based)
+  const parts = [];
+  let running = 0;
+  for (let p = 1; p <= pdf.numPages; p++) {
+    pageStart[p] = running;
+    const page = await pdf.getPage(p);
+    const tc = await page.getTextContent();
+    const lines = [];
+    let line = "";
+    for (const it of tc.items) {
+      line += it.str || "";
+      if (it.hasEOL) { lines.push(line); line = ""; }
+    }
+    if (line) lines.push(line);
+    const pageText = reflowLines(lines);
+    parts.push(pageText);
+    running += pageText.split(/\s+/).filter(Boolean).length;
+  }
+
+  let title = "";
+  try { const md = await pdf.getMetadata(); title = (md && md.info && md.info.Title) || ""; } catch {}
+
+  // Chapters from the PDF outline (bookmarks), mapped to page word-offsets.
+  const chapters = [];
+  try {
+    const outline = await pdf.getOutline();
+    if (outline && outline.length) {
+      const flat = [];
+      (function walk(items, d) {
+        for (const it of items) { flat.push(it); if (it.items && it.items.length && d < 1) walk(it.items, d+1); }
+      })(outline, 0);
+      for (const it of flat) {
+        try {
+          const dest = typeof it.dest === "string" ? await pdf.getDestination(it.dest) : it.dest;
+          if (!dest || !dest[0]) continue;
+          const pageIndex = await pdf.getPageIndex(dest[0]); // 0-based
+          const t = (it.title || "").trim();
+          if (t) chapters.push({ title: t.slice(0, 90), startIdx: pageStart[pageIndex + 1] || 0 });
+        } catch {}
+      }
+      chapters.sort((a, b) => a.startIdx - b.startIdx);
+    }
+  } catch {}
+
+  const text = parts.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (!text) throw new Error("no selectable text — this looks like a scanned PDF (images, not text).");
+  return { title: title || name, text, chapters };
+}
+
+/* Reflow PDF visual lines into paragraphs: join wrapped lines, keep blank-line
+   breaks, and stitch words hyphenated across a line break. */
+function reflowLines(lines) {
+  const paras = [];
+  let para = [];
+  const flush = () => { if (para.length) { paras.push(para.join(" ")); para = []; } };
+  for (const raw of lines) {
+    const l = (raw || "").replace(/\s+/g, " ").trim();
+    if (!l) { flush(); continue; }
+    para.push(l);
+  }
+  flush();
+  return paras.join("\n\n").replace(/([A-Za-z])-\s+([a-z])/g, "$1$2");
 }
 
 function stripHtml(html) {

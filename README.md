@@ -11,9 +11,13 @@ modern browser** and read.
 
 - **Word runner (RSVP) reading** with an ORP "focus letter" (the red pivot) so
   your eyes stay fixed on one point instead of scanning across lines.
-- **Import books you own** — drag-and-drop or pick an **EPUB, AZW3, AZW, MOBI**,
-  or **TXT** file, or paste text. Everything (EPUB unzip, MOBI/AZW3 PalmDOC
-  decompression) is parsed entirely in the browser, keeping chapter structure.
+- **Import books you own** — drag-and-drop or pick a **PDF, EPUB, AZW3, AZW,
+  MOBI**, or **TXT** file (one or many), import a whole folder, or paste text.
+  Everything (PDF text extraction via a vendored Mozilla pdf.js, EPUB unzip,
+  MOBI/AZW3 PalmDOC decompression) is parsed entirely in the browser, keeping
+  chapter structure. PDFs use their bookmarks as chapters.
+- **Library** — every imported book is saved on-device (IndexedDB) with your
+  place in it; reopen any time and it resumes where you left off.
 - **Local library** — imported books and your reading position are saved on your
   device (IndexedDB). Nothing is ever uploaded.
 
