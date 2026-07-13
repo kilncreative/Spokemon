@@ -93,9 +93,28 @@ IN=~/Kindle-Inbox OUT=~/Word-Runner-Books ./tools/kindle-sync.sh --watch
 .\tools\kindle-sync.ps1 -In C:\Kindle-Inbox -Out C:\Word-Runner-Books -Watch
 ```
 
-Requires Calibre + DeDRM installed with your Kindle serial (steps 2–3). To run
-it on login, add it to your startup items / Task Scheduler / a `launchd` or
-`systemd --user` unit.
+Requires Calibre + DeDRM installed with your Kindle serial (steps 2–3).
+
+**Run it automatically at login** with the installer — it writes the right
+service for your OS (launchd on macOS, systemd `--user` on Linux) pointing at
+the folders you choose:
+
+```bash
+IN=~/Kindle-Inbox OUT=~/Dropbox/Books ./tools/install-autostart.sh
+```
+
+Now the converter is always running in the background; you never start it by
+hand. To undo:
+
+```bash
+# macOS
+launchctl unload -w ~/Library/LaunchAgents/com.wordrunner.kindle-sync.plist
+# Linux
+systemctl --user disable --now kindle-sync.service
+```
+
+On **Windows**, point Task Scheduler at `tools/kindle-sync.ps1 -Watch` with the
+trigger *At log on*.
 
 ### 2. Let the books follow you to your phone
 
