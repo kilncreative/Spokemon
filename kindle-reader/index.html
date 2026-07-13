@@ -357,9 +357,9 @@
     </div>
     <div class="panel-body">
       <div class="dropzone" id="dropzone">
-        <b>Drop an EPUB or TXT here</b><br>or
+        <b>Drop a book here</b><br><span style="font-size:12px">EPUB · AZW3 · AZW · MOBI · TXT</span>
         <div><button class="primary" id="pickFile">Choose a file…</button></div>
-        <input type="file" id="fileInput" accept=".epub,.txt,.text,.html,.htm,.md" style="display:none" />
+        <input type="file" id="fileInput" accept=".epub,.azw3,.azw,.mobi,.prc,.txt,.text,.html,.htm,.md" style="display:none" />
       </div>
 
       <div class="group">
@@ -374,11 +374,12 @@
       </div>
 
       <div class="note">
-        <b>About Kindle / Amazon:</b> Amazon has no public API to sign in and stream your
-        Kindle library, and Kindle books are DRM-protected — so no web app can pull that
-        content directly. Import books you own as <b>EPUB</b> or <b>TXT</b> (e.g. exported
-        from Calibre, Project Gutenberg, or your own files) and they read beautifully here.
-        Everything stays <b>on this device</b> — nothing is uploaded.
+        <b>Getting your Kindle books in:</b> drop in a Kindle file (<b>.azw3 / .azw / .mobi</b>)
+        and it reads directly. Amazon wraps purchased books in DRM, so a DRM-protected file
+        needs one prep step: run it through <b>Calibre + the DeDRM plugin</b> and export an
+        <b>EPUB</b> (or let this app read the de-DRM'd Kindle file straight). Step-by-step in
+        <b>IMPORTING-KINDLE-BOOKS.md</b>. EPUB and TXT always work too. Everything stays
+        <b>on this device</b> — nothing is uploaded.
       </div>
     </div>
   </aside>
@@ -696,6 +697,20 @@ async function handleFile(file) {
       const t = title || name;
       loadText(t, text, chapters);
       saveBook(t, text, chapters);
+    } else if (["azw3","azw","mobi","prc"].includes(ext)) {
+      const buf = await file.arrayBuffer();
+      let res;
+      try { res = parseMobi(buf); }
+      catch (e) {
+        if (e.message === "DRM")
+          throw new Error("This Kindle file still has Amazon DRM on it. Strip it with Calibre + the DeDRM plugin, export EPUB, and drop that in. See IMPORTING-KINDLE-BOOKS.md (linked in Library).");
+        if (e.message === "HUFF")
+          throw new Error("This file uses HUFF/CDIC compression I can't unpack in the browser. Convert it to EPUB in Calibre and import that — same result.");
+        throw e;
+      }
+      const t = res.title || name;
+      loadText(t, res.text, res.chapters);
+      saveBook(t, res.text, res.chapters);
     } else {
       const text = await file.text();
       const clean = /html?$/.test(ext) ? stripHtml(text) : text;
@@ -706,6 +721,135 @@ async function handleFile(file) {
     console.error(e);
     alert("Could not read that file: " + e.message);
   }
+}
+
+/* ============================================================
+   MOBI / AZW / AZW3 PARSER  (DRM-free Kindle formats)
+   Palm Database + MOBI header + PalmDOC decompression, all in
+   the browser. DRM-protected or HUFF/CDIC files are detected and
+   reported (they must be converted to EPUB via Calibre + DeDRM).
+   ============================================================ */
+function parseMobi(buf) {
+  const bytes = new Uint8Array(buf);
+  const dv = new DataView(buf);
+  if (bytes.length < 78) throw new Error("Not a Kindle file");
+
+  const numRecords = dv.getUint16(76, false);
+  const recOffsets = [];
+  for (let i = 0; i < numRecords; i++) recOffsets.push(dv.getUint32(78 + i*8, false));
+  const rec0 = recOffsets[0];
+
+  // PalmDOC header (first 16 bytes of record 0)
+  const compression = dv.getUint16(rec0 + 0, false);   // 1=none 2=PalmDOC 17480=HUFF
+  const textLength  = dv.getUint32(rec0 + 4, false);
+  const recordCount = dv.getUint16(rec0 + 8, false);
+  const encryption  = dv.getUint16(rec0 + 12, false);  // 0=none 1/2=DRM
+  if (encryption !== 0) throw new Error("DRM");
+  if (compression === 17480) throw new Error("HUFF");
+
+  // MOBI header (starts at record0 + 16)
+  let textEncoding = 65001, fullName = "", extraFlags = 0;
+  const magic = String.fromCharCode(bytes[rec0+16], bytes[rec0+17], bytes[rec0+18], bytes[rec0+19]);
+  if (magic === "MOBI") {
+    const mobiLen = dv.getUint32(rec0 + 20, false);
+    textEncoding  = dv.getUint32(rec0 + 28, false);
+    const fnOff   = dv.getUint32(rec0 + 84, false);
+    const fnLen   = dv.getUint32(rec0 + 88, false);
+    if (fnOff && fnLen && rec0 + fnOff + fnLen <= bytes.length) {
+      try { fullName = decodeBytes(bytes.subarray(rec0+fnOff, rec0+fnOff+fnLen), textEncoding); } catch {}
+    }
+    if (mobiLen >= 0xE4) extraFlags = dv.getUint16(rec0 + 242, false);
+  }
+
+  // Decompress text records 1..recordCount and concatenate
+  const chunks = [];
+  const lastRec = Math.min(recordCount, numRecords - 1);
+  for (let i = 1; i <= lastRec; i++) {
+    const start = recOffsets[i];
+    const end = (i + 1 < recOffsets.length) ? recOffsets[i+1] : bytes.length;
+    let rec = bytes.subarray(start, end);
+    rec = trimTrailingBytes(rec, extraFlags);
+    chunks.push(compression === 2 ? palmDocInflate(rec) : rec);
+  }
+  let total = 0; chunks.forEach(c => total += c.length);
+  const merged = new Uint8Array(total);
+  let p = 0; chunks.forEach(c => { merged.set(c, p); p += c.length; });
+  const html = decodeBytes(merged.subarray(0, textLength || total), textEncoding);
+
+  return htmlToBook(html, fullName);
+}
+
+function decodeBytes(u8, enc) {
+  const label = (enc === 1252) ? "windows-1252" : "utf-8";
+  return new TextDecoder(label).decode(u8);
+}
+
+/* Strip MOBI trailing-data entries so decompression stays aligned. */
+function trimTrailingBytes(rec, flags) {
+  for (let bit = 1; bit < 16; bit++) {
+    if (flags & (1 << bit)) {
+      const n = sizeOfTrailingEntry(rec);
+      if (n > 0 && n < rec.length) rec = rec.subarray(0, rec.length - n);
+    }
+  }
+  if (flags & 1) {
+    const num = (rec[rec.length-1] & 0x3) + 1;
+    if (num < rec.length) rec = rec.subarray(0, rec.length - num);
+  }
+  return rec;
+}
+function sizeOfTrailingEntry(rec) {
+  let num = 0;
+  const tail = rec.subarray(Math.max(0, rec.length - 4));
+  for (let i = 0; i < tail.length; i++) {
+    const v = tail[i];
+    if (v & 0x80) num = 0;
+    num = (num << 7) | (v & 0x7f);
+  }
+  return num;
+}
+
+/* PalmDOC (LZ77 variant) decompression. */
+function palmDocInflate(input) {
+  const out = [];
+  const n = input.length;
+  let i = 0;
+  while (i < n) {
+    const c = input[i++];
+    if (c === 0) { out.push(0); }
+    else if (c <= 8) { for (let j = 0; j < c && i < n; j++) out.push(input[i++]); }
+    else if (c <= 0x7f) { out.push(c); }
+    else if (c <= 0xbf) {
+      if (i >= n) break;
+      const v = (c << 8) | input[i++];
+      const dist = (v >> 3) & 0x7ff;
+      const len = (v & 7) + 3;
+      let src = out.length - dist;
+      if (src < 0) break;
+      for (let j = 0; j < len; j++) out.push(out[src++]);
+    } else { out.push(32); out.push(c ^ 0x80); }
+  }
+  return Uint8Array.from(out);
+}
+
+/* Turn a book's HTML into { text, chapters } using headings as chapter marks. */
+function htmlToBook(html, title) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("script,style,head").forEach(n => n.remove());
+  const body = doc.body || doc.documentElement;
+  const chapters = [];
+  for (const h of body.querySelectorAll("h1,h2,h3")) {
+    const t = (h.textContent || "").trim();
+    if (!t) continue;
+    try {
+      const r = document.createRange(); r.setStart(body, 0); r.setEndBefore(h);
+      const idx = r.toString().split(/\s+/).filter(Boolean).length;
+      chapters.push({ title: t.slice(0, 90), startIdx: idx });
+    } catch {}
+  }
+  body.querySelectorAll("p,div,br,h1,h2,h3,h4,li").forEach(n => n.after(document.createTextNode("\n\n")));
+  const text = (body.textContent || "").replace(/\n{3,}/g, "\n\n").trim();
+  return { text, chapters, title };
 }
 
 function stripHtml(html) {

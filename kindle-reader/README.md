@@ -11,9 +11,9 @@ modern browser** and read.
 
 - **Word runner (RSVP) reading** with an ORP "focus letter" (the red pivot) so
   your eyes stay fixed on one point instead of scanning across lines.
-- **Import books you own** — drag-and-drop or pick an **EPUB** or **TXT** file,
-  or paste text. EPUBs are unzipped and parsed entirely in the browser, keeping
-  chapter structure.
+- **Import books you own** — drag-and-drop or pick an **EPUB, AZW3, AZW, MOBI**,
+  or **TXT** file, or paste text. Everything (EPUB unzip, MOBI/AZW3 PalmDOC
+  decompression) is parsed entirely in the browser, keeping chapter structure.
 - **Local library** — imported books and your reading position are saved on your
   device (IndexedDB). Nothing is ever uploaded.
 
@@ -39,13 +39,15 @@ modern browser** and read.
 | `S` | Reading settings |
 | `Esc` | Close panels |
 
-## About connecting an Amazon / Kindle account
+## Getting your Kindle books in
 
-Amazon does **not** provide a public API to sign in and stream your Kindle
-library, and Kindle books are DRM-protected, so no web app can pull that content
-directly. Instead, import books you own as **EPUB** or **TXT** — for example
-titles from Project Gutenberg, files exported with Calibre, or your own
-documents — and they read beautifully here. All processing stays on your device.
+Word Runner reads Kindle's own **AZW3 / AZW / MOBI** formats directly, plus
+**EPUB** and **TXT**. Amazon wraps purchased books in DRM, so a purchased file
+needs one prep step — stripping the DRM with **Calibre + the DeDRM plugin** using
+your own account/device key, then importing the result.
+
+**See [IMPORTING-KINDLE-BOOKS.md](IMPORTING-KINDLE-BOOKS.md) for the exact
+step-by-step.** All processing stays on your device; nothing is uploaded.
 
 ## Run it
 
