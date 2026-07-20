@@ -224,6 +224,8 @@
     border: 1px solid var(--panel-line); background: var(--bg); text-align: left;
   }
   .libitem:hover { border-color: var(--accent); }
+  .libitem .cover { width: 40px; height: 56px; border-radius: 5px; flex: none; object-fit: cover; box-shadow: 0 1px 4px rgba(0,0,0,.25); background: var(--panel-line); }
+  .libitem .cover.tile { display: grid; place-items: center; color: #fff; font-family: Georgia, serif; font-size: 22px; font-weight: 700; }
   .libitem .meta { flex: 1; min-width: 0; }
   .libitem .meta strong { display: block; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .libitem .meta span { font-size: 11px; color: var(--muted); }
@@ -390,15 +392,21 @@
     </div>
   </aside>
 
-<!-- Mozilla pdf.js (vendored locally) — powers PDF text extraction -->
+<!-- Mozilla pdf.js (vendored locally) — powers PDF text extraction.
+     The block between the PDFJS markers is swapped for inlined scripts by
+     tools/build-standalone.sh to produce a single self-contained file. -->
+<!-- PDFJS:START -->
 <script src="vendor/pdf.min.js"></script>
+<!-- PDFJS:END -->
 <script>
 "use strict";
 /* ============================================================
    Word Runner — a minimal, Kindle-styled RSVP speed reader.
    Local-first: all parsing and storage happen on this device.
    ============================================================ */
-if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
+// Multi-file build uses a real worker; the inlined standalone runs pdf.js on
+// the main thread via window.pdfjsWorker (set __PDF_INLINE=1 by the builder).
+if (window.pdfjsLib && !window.__PDF_INLINE) pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 
 /* ---------- Kindle-style themes ---------- */
 const THEMES = {
@@ -462,7 +470,7 @@ function applySettings() {
   r.setProperty("--panel-line", t.line);
   r.setProperty("--accent", t.accent);
   r.setProperty("--guide", S.settings.rail ? t.guide : "transparent");
-  document.querySelector('meta[name=theme-color]').setAttribute("content", t.bg);
+  const tcMeta = document.querySelector('meta[name=theme-color]'); if (tcMeta) tcMeta.setAttribute("content", t.bg);
 
   const f = FONTS.find(f => f.id === S.settings.font) || FONTS[0];
   r.setProperty("--font", f.stack);
@@ -702,8 +710,8 @@ async function parseAnyFile(file) {
   const ext = (file.name.split(".").pop()||"").toLowerCase();
   if (ext === "pdf") return await parsePdf(file, name);
   if (ext === "epub") {
-    const { text, chapters, title } = await parseEpub(await file.arrayBuffer());
-    return { title: title || name, text, chapters };
+    const { text, chapters, title, cover } = await parseEpub(await file.arrayBuffer());
+    return { title: title || name, text, chapters, cover };
   }
   if (["azw3","azw","mobi","prc"].includes(ext)) {
     let res;
@@ -733,7 +741,7 @@ async function importFiles(fileList) {
     try {
       const r = await parseAnyFile(files[i]);
       if (!r.text || !r.text.trim()) throw new Error("no readable text");
-      await saveBook(r.title, r.text, r.chapters);
+      await saveBook(r.title, r.text, r.chapters, r.cover);
       if (activate) loadText(r.title, r.text, r.chapters);
       ok++;
     } catch (e) { failed.push(files[i].name + " — " + e.message); }
@@ -951,7 +959,20 @@ async function parsePdf(file, name) {
 
   const text = parts.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
   if (!text) throw new Error("no selectable text — this looks like a scanned PDF (images, not text).");
-  return { title: title || name, text, chapters };
+
+  // Cover = rendered first page.
+  let cover = "";
+  try {
+    const page1 = await pdf.getPage(1);
+    const vp0 = page1.getViewport({ scale: 1 });
+    const v = page1.getViewport({ scale: Math.min(2, 150 / vp0.width) });
+    const cv = document.createElement("canvas");
+    cv.width = Math.round(v.width); cv.height = Math.round(v.height);
+    await page1.render({ canvasContext: cv.getContext("2d"), viewport: v }).promise;
+    cover = cv.toDataURL("image/jpeg", 0.6);
+  } catch {}
+
+  return { title: title || name, text, chapters, cover };
 }
 
 /* Reflow PDF visual lines into paragraphs: join wrapped lines, keep blank-line
@@ -997,11 +1018,18 @@ async function parseEpub(buf) {
 
   const title = opf.querySelector("metadata > *|title, title")?.textContent?.trim();
 
-  // 2. manifest id -> href
+  // 2. manifest id -> href (+ note the cover image)
   const manifest = {};
+  let coverHref = null;
   opf.querySelectorAll("manifest > item").forEach(it => {
-    manifest[it.getAttribute("id")] = it.getAttribute("href");
+    const id = it.getAttribute("id"), href = it.getAttribute("href");
+    manifest[id] = href;
+    if ((it.getAttribute("properties")||"").includes("cover-image")) coverHref = href;
   });
+  if (!coverHref) {
+    const metaId = opf.querySelector('metadata > meta[name="cover"]')?.getAttribute("content");
+    if (metaId && manifest[metaId]) coverHref = manifest[metaId];
+  }
   // 3. spine order
   const spine = [...opf.querySelectorAll("spine > itemref")].map(r => r.getAttribute("idref"));
 
@@ -1026,7 +1054,45 @@ async function parseEpub(buf) {
     running += wc;
     parts.push(chapText);
   }
-  return { text: parts.join("\n\n"), chapters, title };
+
+  // Cover image -> data URL (if the EPUB declares one).
+  let cover = "";
+  if (coverHref) {
+    try {
+      const cp = normalizePath(baseDir + decodeURIComponent(coverHref.split("#")[0]));
+      const cbytes = files.get(cp) || files.get(coverHref);
+      if (cbytes) {
+        const ext = (coverHref.split(".").pop()||"").toLowerCase();
+        const mime = ext === "png" ? "image/png" : ext === "gif" ? "image/gif"
+                   : ext === "svg" ? "image/svg+xml" : "image/jpeg";
+        cover = await shrinkImage("data:" + mime + ";base64," + bytesToBase64(cbytes));
+      }
+    } catch {}
+  }
+
+  return { text: parts.join("\n\n"), chapters, title, cover };
+}
+
+/* Downscale a cover image to a small JPEG data URL to keep storage light. */
+function shrinkImage(dataUrl) {
+  return new Promise((res) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const w = 150, h = Math.round(w * img.height / img.width) || 200;
+        const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+        cv.getContext("2d").drawImage(img, 0, 0, w, h);
+        res(cv.toDataURL("image/jpeg", 0.6));
+      } catch { res(dataUrl); }
+    };
+    img.onerror = () => res("");
+    img.src = dataUrl;
+  });
+}
+function bytesToBase64(u8) {
+  let s = ""; const chunk = 0x8000;
+  for (let i = 0; i < u8.length; i += chunk) s += String.fromCharCode.apply(null, u8.subarray(i, i+chunk));
+  return btoa(s);
 }
 
 function normalizePath(p) {
@@ -1102,10 +1168,15 @@ function db() {
     r.onerror = () => rej(r.error);
   });
 }
-async function saveBook(title, text, chapters) {
+async function saveBook(title, text, chapters, cover) {
   const id = "b_" + Math.abs(hash(title + text.length)).toString(36);
-  const rec = { id, title, text, chapters: chapters||[], progress: 0, added: Date.now(), words: text.split(/\s+/).length };
   const d = await db();
+  const existing = await tx(d, "readonly", s => s.get(id), true);
+  const rec = {
+    id, title, text, chapters: chapters||[], cover: cover || (existing && existing.cover) || "",
+    progress: (existing && existing.progress) || 0, idx: (existing && existing.idx) || 0,
+    added: (existing && existing.added) || Date.now(), words: text.split(/\s+/).filter(Boolean).length
+  };
   await tx(d, "readwrite", s => s.put(rec));
   S.book = { id, title };
   refreshLibrary();
@@ -1144,7 +1215,10 @@ async function refreshLibrary() {
   for (const rec of all) {
     const pct = Math.round((rec.progress||0)*100);
     const el = document.createElement("div"); el.className = "libitem";
-    el.innerHTML = `<div class="meta"><strong>${esc(rec.title)}</strong>
+    const cover = rec.cover
+      ? `<img class="cover" src="${rec.cover}" alt="">`
+      : `<div class="cover tile" style="background:${tileColor(rec.title)}">${esc((rec.title||"?").trim()[0]||"?").toUpperCase()}</div>`;
+    el.innerHTML = `${cover}<div class="meta"><strong>${esc(rec.title)}</strong>
       <span>${(rec.words||0).toLocaleString()} words${pct?` · ${pct}% read`:""}</span></div>
       <button class="del" title="Remove">🗑</button>`;
     el.querySelector(".meta").onclick = () => openBook(rec);
@@ -1166,6 +1240,7 @@ function openBook(rec) {
   pause(); renderWord(); updateScrub(); closePanels();
 }
 function hash(str){ let h=0; str=String(str); for(let i=0;i<str.length;i++){h=(h<<5)-h+str.charCodeAt(i)|0;} return h; }
+function tileColor(str){ const h = Math.abs(hash(str)) % 360; return `hsl(${h} 42% 58%)`; }
 
 /* ============================================================
    PANELS + EVENTS
